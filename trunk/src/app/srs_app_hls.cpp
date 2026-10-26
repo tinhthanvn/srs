@@ -45,6 +45,11 @@ using namespace std;
 // reset the piece id when deviation overflow this.
 #define SRS_JUMP_WHEN_PIECE_DEVIATION 20
 
+// cloudcamera: rebuild cadence after a packaging or reload failure, and the
+// interval between repeated recovery warnings while the fault persists.
+#define SRS_HLS_RECOVERY_RETRY (2 * SRS_UTIME_SECONDS)
+#define SRS_HLS_RECOVERY_WARN (30 * SRS_UTIME_SECONDS)
+
 SrsHlsSegment::SrsHlsSegment(SrsTsContext* c, SrsAudioCodecId ac, SrsVideoCodecId vc, SrsFileWriter* w)
 {
     sequence_no = 0;
@@ -434,6 +439,7 @@ srs_error_t SrsHlsMuxer::segment_open()
     current->sequence_no = _sequence_no++;
 
     if ((err = write_hls_key()) != srs_success) {
+        srs_freep(current);
         return srs_error_wrap(err, "write hls key");
     }
     
@@ -505,12 +511,16 @@ srs_error_t SrsHlsMuxer::segment_open()
     
     // create dir recursively for hls.
     if ((err = current->create_dir()) != srs_success) {
+        srs_freep(current);
         return srs_error_wrap(err, "create dir");
     }
     
     // open temp ts file.
     std::string tmp_file = current->tmppath();
     if ((err = current->writer->open(tmp_file)) != srs_success) {
+        // Leave no half-open segment behind: the next open must retry, not
+        // short-circuit on "segment is already open".
+        srs_freep(current);
         return srs_error_wrap(err, "open hls muxer");
     }
 
@@ -605,10 +615,10 @@ srs_error_t SrsHlsMuxer::flush_video(SrsTsMessageCache* cache)
 {
     srs_error_t err = srs_success;
     
-    // if current is NULL, segment is not open, ignore the flush event.
+    // if current is NULL, segment is not open, which means the muxer is broken.
+    // Report it instead of silently dropping every frame of the stream.
     if (!current) {
-        srs_warn("flush video ignored, for segment is not open.");
-        return err;
+        return srs_error_new(ERROR_HLS_WRITE_FAILED, "hls: segment is not open");
     }
     
     if (!cache->video || cache->video->payload->length() <= 0) {
@@ -1151,6 +1161,9 @@ SrsHls::SrsHls()
     disposable = false;
     unpublishing_ = false;
     async_reload_ = reloading_ = false;
+    reload_retry_at_ = 0;
+    reload_failures_ = 0;
+    reload_warn_at_ = 0;
     last_update_time = 0;
     hls_dts_directly = false;
     
@@ -1173,15 +1186,17 @@ SrsHls::~SrsHls()
 void SrsHls::async_reload()
 {
     async_reload_ = true;
+    // A config reload must take effect at once, even if a recovery retry is
+    // still waiting for its slot.
+    reload_retry_at_ = 0;
 }
 
 srs_error_t SrsHls::reload()
 {
     srs_error_t err = srs_success;
 
-    // Ignore if not active.
-    if (!enabled) return err;
-
+    // Note that a failed reload leaves the muxer disabled; do_reload() still
+    // has to run so the muxer can be rebuilt, so there is no enabled check.
     int reloading = 0, reloaded = 0, refreshed = 0;
     err = do_reload(&reloading, &reloaded, &refreshed);
     srs_trace("async reload hls %s, reloading=%d, reloaded=%d, refreshed=%d",
@@ -1199,14 +1214,43 @@ srs_error_t SrsHls::do_reload(int *reloading, int *reloaded, int *refreshed)
     *reloading = 1;
 
     on_unpublish();
-    if ((err = on_publish()) != srs_success) {
-        return srs_error_wrap(err, "hls publish failed");
+    err = on_publish();
+
+    // Always release the reload lock. Upstream returns here with reloading_
+    // still set, so every later frame short-circuits in reload() and the HLS
+    // output stays frozen until SRS restarts.
+    reloading_ = false;
+
+    if (err != srs_success) {
+        // Keep the publisher alive and retry on a fixed cadence. A transient
+        // filesystem or muxer fault must not cost the camera's live stream.
+        *reloading = 0;
+        reload_failures_++;
+        reload_retry_at_ = srs_get_system_time() + SRS_HLS_RECOVERY_RETRY;
+
+        srs_utime_t now = srs_get_system_time();
+        if (reload_failures_ == 1 || now >= reload_warn_at_) {
+            reload_warn_at_ = now + SRS_HLS_RECOVERY_WARN;
+            srs_warn("hls: rebuild failed, retry in %dms (attempt %d): %s",
+                srsu2msi(SRS_HLS_RECOVERY_RETRY), reload_failures_, srs_error_desc(err).c_str());
+        }
+
+        srs_freep(err);
+        return srs_success;
+    }
+
+    // Rebuilt; media flows again.
+    if (reload_failures_ > 0) {
+        srs_warn("hls: rebuilt after %d failed attempt(s), %s recovered",
+            reload_failures_, req->get_stream_url().c_str());
     }
     *reloaded = 1;
 
     // Before feed the sequence header, must reset the reloading.
-    reloading_ = false;
     async_reload_ = false;
+    reload_failures_ = 0;
+    reload_retry_at_ = 0;
+    reload_warn_at_ = 0;
 
     // After reloading, we must request the sequence header again.
     if ((err = hub->on_hls_request_sh()) != srs_success) {
@@ -1217,12 +1261,32 @@ srs_error_t SrsHls::do_reload(int *reloading, int *reloaded, int *refreshed)
     return err;
 }
 
+void SrsHls::on_error()
+{
+    // The muxer is unusable (open/rename/write failed). Tear it down and arm a
+    // rebuild; upstream just calls on_unpublish() from the hub, which disables
+    // HLS until the next publisher session and leaves the playlist frozen.
+    if (unpublishing_ || async_reload_) return;
+
+    srs_warn("hls: self-heal scheduled for %s", req->get_stream_url().c_str());
+    on_unpublish();
+
+    async_reload_ = true;
+    reload_retry_at_ = srs_get_system_time() + SRS_HLS_RECOVERY_RETRY;
+}
+
 void SrsHls::dispose()
 {
     if (enabled) {
         on_unpublish();
     }
-    
+
+    // No publisher is left, so any pending rebuild is stale.
+    async_reload_ = reloading_ = false;
+    reload_retry_at_ = 0;
+    reload_failures_ = 0;
+    reload_warn_at_ = 0;
+
     // Ignore when hls_dispose disabled.
     // @see https://github.com/ossrs/srs/issues/865
     srs_utime_t hls_dispose = _srs_config->get_hls_dispose(req->vhost);
@@ -1353,9 +1417,15 @@ srs_error_t SrsHls::on_audio(SrsSharedPtrMessage* shared_audio, SrsFormat* forma
 {
     srs_error_t err = srs_success;
 
+    // A pending rebuild also runs while the muxer is closed, otherwise a failed
+    // reload could only heal on a new publisher session.
+    if (async_reload_) {
+        if (unpublishing_ || reloading_ || reload_retry_at_ > srs_get_system_time()) return err;
+        return reload();
+    }
+
     // If not able to transmux to HLS, ignore.
     if (!enabled || unpublishing_) return err;
-    if (async_reload_) return reload();
 
     // Ignore if no format->acodec, it means the codec is not parsed, or unknown codec.
     // @issue https://github.com/ossrs/srs/issues/1506#issuecomment-562079474
@@ -1434,9 +1504,15 @@ srs_error_t SrsHls::on_video(SrsSharedPtrMessage* shared_video, SrsFormat* forma
 {
     srs_error_t err = srs_success;
 
+    // A pending rebuild also runs while the muxer is closed, otherwise a failed
+    // reload could only heal on a new publisher session.
+    if (async_reload_) {
+        if (unpublishing_ || reloading_ || reload_retry_at_ > srs_get_system_time()) return err;
+        return reload();
+    }
+
     // If not able to transmux to HLS, ignore.
     if (!enabled || unpublishing_) return err;
-    if (async_reload_) return reload();
 
     // Ignore if no format->vcodec, it means the codec is not parsed, or unknown codec.
     // @issue https://github.com/ossrs/srs/issues/1506#issuecomment-562079474

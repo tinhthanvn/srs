@@ -978,7 +978,9 @@ srs_error_t SrsOriginHub::on_audio(SrsSharedPtrMessage* shared_audio)
         std::string hls_error_strategy = _srs_config->get_hls_on_error(req_->vhost);
         if (srs_config_hls_is_on_error_ignore(hls_error_strategy)) {
             srs_warn("hls: ignore audio error %s", srs_error_desc(err).c_str());
-            hls->on_unpublish();
+            // cloudcamera: rebuild the muxer instead of disabling HLS until the
+            // next publisher session, which leaves the playlist frozen.
+            hls->on_error();
             srs_error_reset(err);
         } else if (srs_config_hls_is_on_error_continue(hls_error_strategy)) {
             if (srs_hls_can_continue(srs_error_code(err), source_->meta->ash(), msg)) {
@@ -1071,7 +1073,9 @@ srs_error_t SrsOriginHub::on_video(SrsSharedPtrMessage* shared_video, bool is_se
         std::string hls_error_strategy = _srs_config->get_hls_on_error(req_->vhost);
         if (srs_config_hls_is_on_error_ignore(hls_error_strategy)) {
             srs_warn("hls: ignore video error %s", srs_error_desc(err).c_str());
-            hls->on_unpublish();
+            // cloudcamera: rebuild the muxer instead of disabling HLS until the
+            // next publisher session, which leaves the playlist frozen.
+            hls->on_error();
             srs_error_reset(err);
         } else if (srs_config_hls_is_on_error_continue(hls_error_strategy)) {
             if (srs_hls_can_continue(srs_error_code(err), source_->meta->vsh(), msg)) {

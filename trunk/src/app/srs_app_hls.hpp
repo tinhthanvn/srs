@@ -288,6 +288,11 @@ private:
     // Whether requires HLS to do reload asynchronously.
     bool async_reload_;
     bool reloading_;
+    // cloudcamera: self-heal state for a failed muxer rebuild. Upstream leaves
+    // reloading_ set when on_publish() fails, which freezes HLS forever.
+    srs_utime_t reload_retry_at_;
+    int reload_failures_;
+    srs_utime_t reload_warn_at_;
     // To detect heartbeat and dispose it if configured.
     srs_utime_t last_update_time;
 private:
@@ -324,6 +329,10 @@ public:
     // The unpublish event, only close the muxer, donot destroy the
     // muxer, for when we continue to publish, the m3u8 will continue.
     virtual void on_unpublish();
+    // cloudcamera: a packaging error left the muxer unusable. Close it and
+    // schedule a rebuild so HLS recovers on its own while the publisher and
+    // every other output keep running.
+    virtual void on_error();
     // Mux the audio packets to ts.
     // @param shared_audio, directly ptr, copy it if need to save it.
     virtual srs_error_t on_audio(SrsSharedPtrMessage* shared_audio, SrsFormat* format);
