@@ -1,0 +1,70 @@
+# Cloud Camera V2 — SRS node configuration example (sanitized)
+#
+# This is an EXAMPLE. Each node needs its own addresses, ports, callback token,
+# storage mount and DVR path. Never copy a workstation's values to a node.
+#
+# Placeholders in <ANGLE_BRACKETS> must be replaced. Nothing here is a secret.
+
+listen              1935;
+max_connections     1000;
+daemon              off;
+srs_log_tank        console;
+
+http_api {
+    enabled         on;
+    listen          1985;
+    # Keep the API private (loopback / operator allowlist). It is unauthenticated
+    # by default; never expose it to the internet.
+    crossdomain     off;
+}
+
+http_server {
+    enabled         on;
+    listen          8080;
+    dir             <HLS_MEDIA_DIR>;
+}
+
+vhost __defaultVhost__ {
+    # HTTP-FLV origin. In SRS 6 this belongs INSIDE the vhost, never in
+    # http_server. Reach it only from the backend media gateway; browsers must
+    # use the application's authenticated /media/live/{ticket} path.
+    http_remux {
+        enabled     on;
+        mount       [vhost]/[app]/[stream].flv;
+        fast_cache  0;
+    }
+
+    hls {
+        enabled             on;
+        hls_path            <HLS_MEDIA_DIR>;
+        hls_m3u8_file       live/[stream]/[stream].m3u8;
+        hls_ts_file         live/[stream]/[stream]-[seq].ts;
+        hls_fragment        2;
+        hls_window          5;
+        hls_cleanup         on;
+        hls_wait_keyframe   on;
+        # Requires the cc1 image: rebuilds the muxer after a packaging error.
+        hls_on_error        ignore;
+        hls_dispose         0;
+    }
+
+    # Per-node admission. Use the node's OWN token; the legacy shared token is
+    # only acceptable on a node explicitly marked for legacy ingress.
+    http_hooks {
+        enabled         on;
+        on_publish      http://<BACKEND_HOST>:8080/api/srs/callbacks/<NODE_CALLBACK_TOKEN>/on_publish;
+        on_unpublish    http://<BACKEND_HOST>:8080/api/srs/callbacks/<NODE_CALLBACK_TOKEN>/on_unpublish;
+        on_dvr          http://<BACKEND_HOST>:8080/api/srs/callbacks/<NODE_CALLBACK_TOKEN>/on_dvr;
+    }
+
+    # DVR is the primary recorder. The backend policy applier rewrites
+    # dvr_apply at runtime; mount the media volume that the uploader reads.
+    dvr {
+        enabled           on;
+        dvr_plan          segment;
+        dvr_duration      300;
+        dvr_wait_keyframe on;
+        # dvr_apply      <rewritten by the backend SrsDvrPolicyApplier>
+        dvr_path          <DVR_MEDIA_DIR>/[app]/[stream]/[2006][01][02]-[15][04][05].[999].mp4;
+    }
+}
