@@ -10,8 +10,20 @@
     "sizeBytes": 59891846,
     "workingDir": "/usr/local/srs",
     "entrypoint": null,
-    "defaultCommand": ["./objs/srs", "-c", "conf/docker.conf"],
-    "exposedPorts": ["1935/tcp", "1985/tcp", "8080/tcp", "8000/udp", "10080/udp", "5060/tcp", "9000/tcp"],
+    "defaultCommand": [
+      "./objs/srs",
+      "-c",
+      "conf/docker.conf"
+    ],
+    "exposedPorts": [
+      "1935/tcp",
+      "1985/tcp",
+      "8080/tcp",
+      "8000/udp",
+      "10080/udp",
+      "5060/tcp",
+      "9000/tcp"
+    ],
     "labels": {
       "org.cloudcamera.srs.channel": "cc1",
       "org.cloudcamera.srs.patch.sha256": "40f531fcfd2c127e32d7da249b988ad12523644da1e820a06bb1d70526258660",
@@ -29,8 +41,7 @@
     "srsVersion": "6.0.193",
     "repository": "https://github.com/tinhthanvn/srs",
     "branch": "cloudcamera/6.0.193-cc1",
-    "branchHead": "7549ae15b9ae65daae8a04997d8828be61618918",
-    "branchHeadNote": "docs-only commits on top of the tested source commit; the image is built from testedCommit",
+    "branchHeadNote": "not pinned: scripts/docs commits follow testedCommit; the image is built from testedCommit (a6565e63c)",
     "testedCommit": "a6565e63c95cb2249f1808182e03f0cde782e77d",
     "releaseTag": "cc-v6.0.193-cc1",
     "releaseTagObject": "2bfb2b4ffe9a6f069c9284b5f9cc28bc6acf1975",
