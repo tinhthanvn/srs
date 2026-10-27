@@ -1,0 +1,59 @@
+# Cloud Camera V2 — SRS node deployment (per-node, Owner-executed)
+#
+# One node at a time. This file is a template: every value that differs per node
+# is read from the environment (see .env.example next to this file). Never reuse
+# a workstation's addresses, mounts or callback token on a node.
+#
+# Required:
+#   CC_SRS_CONF      absolute path to the node's srs.conf (mounted read-only)
+#   CC_MEDIA_DIR     absolute path to the node's media/DVR volume
+# Optional (defaults shown):
+#   CC_PROJECT=cloudcamera-srs
+#   CC_SRS_CONTAINER=cloudcamera-srs
+#   CC_SRS_IMAGE=cloudcamera-srs:6.0.193-cc1   (override only for rollback)
+#   CC_RTMP_BIND=0.0.0.0          cameras publish here
+#   CC_HTTP_BIND=127.0.0.1        HLS + HTTP-FLV origin: backend/allowlist only
+#   CC_HTTP_PORT=8080
+#   CC_API_BIND=127.0.0.1         SRS API is unauthenticated: never public
+#   CC_API_PORT=1985
+#   CC_RTC_BIND=0.0.0.0
+#
+# If the backend polls this node over the network, bind CC_API_BIND to the node's
+# private interface address (or tunnel it) and firewall 1985 to the backend IP.
+# Do the same for CC_HTTP_BIND only if the backend media gateway must reach the
+# FLV origin directly. Browsers must never get the raw origin URL.
+
+name: ${CC_PROJECT:-cloudcamera-srs}
+
+services:
+  srs:
+    image: ${CC_SRS_IMAGE:-cloudcamera-srs:6.0.193-cc1}
+    container_name: ${CC_SRS_CONTAINER:-cloudcamera-srs}
+    restart: unless-stopped
+    command: ["./objs/srs", "-c", "conf/srs.conf"]
+    ports:
+      - "${CC_RTMP_BIND:-0.0.0.0}:1935:1935"
+      - "${CC_HTTP_BIND:-127.0.0.1}:${CC_HTTP_PORT:-8080}:8080"
+      - "${CC_API_BIND:-127.0.0.1}:${CC_API_PORT:-1985}:1985"
+      - "${CC_RTC_BIND:-0.0.0.0}:8000:8000/udp"
+    volumes:
+      - "${CC_SRS_CONF:?set CC_SRS_CONF to the node srs.conf path}:/usr/local/srs/conf/srs.conf:ro"
+      - "${CC_MEDIA_DIR:?set CC_MEDIA_DIR to the node media volume}:/data/media"
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    # Observational only: nothing acts on unhealthy. It catches a dead process,
+    # not a frozen muxer — per-stream recovery is the cc1 self-heal plus the
+    # backend freshness watchdog.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/1935'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"

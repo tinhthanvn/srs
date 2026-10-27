@@ -19,6 +19,10 @@ Verify locally before upload:
 sha256sum -c cloudcamera-srs-6.0.193-cc1-linux-amd64.tar.sha256
 ```
 
+The release directory also carries `image-manifest.json`, `docker-compose.uat.yml`,
+`srs.conf.example`, `install-ubuntu.sh`, `verify-ubuntu.sh` and `rollback-ubuntu.sh`.
+Upload the whole directory to each node; the scripts expect to sit next to the archive.
+
 ## 1. Per-node preflight (read-only)
 
 Run on the node, record the output in the worksheet.
@@ -44,31 +48,50 @@ Stop if:
 
 ## 2. Back up the node
 
+`install-ubuntu.sh` already does this in §3. To do it by hand instead:
+
 ```bash
-mkdir -p /root/srs-rollback-$(date +%Y%m%d)
-docker inspect <container> > /root/srs-rollback-*/container.json
-cp <current-srs.conf> /root/srs-rollback-*/srs.conf
-cp <current-compose.yml> /root/srs-rollback-*/compose.yml
-docker image inspect <current-image> > /root/srs-rollback-*/image.json
+export B=/root/srs-rollback-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$B"
+docker inspect <container> > "$B/container.json"
+cp <current-srs.conf> "$B/srs.conf.previous"
+cp <current-compose.yml> "$B/compose.yml"
+docker image inspect <current-image> > "$B/previous-image.json"
 # Optional, when the running image is a previous custom build:
-docker save -o /root/srs-rollback-*/previous-image.tar <current-image>
+docker save -o "$B/previous-image.tar" <current-image>
 ```
 
-Keep the previous image tag on the node. Do not delete it until the new node is accepted.
+Record `$B` in the worksheet. Keep the previous image tag on the node. Do not delete it until
+the new node is accepted.
 
 ## 3. Load and verify the image
+
+`install-ubuntu.sh` does the checksum, load, provenance check, backup and staging in one
+read-only-to-the-runtime step. It **never** stops or restarts a container:
+
+```bash
+sudo ./install-ubuntu.sh
+# optional when auto-detection is ambiguous:
+sudo SRS_CONTAINER=<current-container> CC_SRS_CONF=<config> CC_MEDIA_DIR=<media> \
+  ./install-ubuntu.sh
+```
+
+It writes `/root/srs-rollback-<timestamp>/` (container inspect, current image inspect,
+`srs.conf.previous`, `backup-meta.env`) and stages the compose file under
+`/opt/cloudcamera-srs/6.0.193-cc1/`. The equivalent manual steps are:
 
 ```bash
 sha256sum -c cloudcamera-srs-6.0.193-cc1-linux-amd64.tar.sha256
 docker load -i cloudcamera-srs-6.0.193-cc1-linux-amd64.tar
 docker image inspect cloudcamera-srs:6.0.193-cc1 \
   --format '{{.Id}} {{.Architecture}} {{json .Config.Labels}}'
-docker run --rm --entrypoint sh cloudcamera-srs:6.0.193-cc1 -c '/usr/local/srs/objs/srs -v'
+docker run --rm --entrypoint ./objs/srs cloudcamera-srs:6.0.193-cc1 -v
 ```
 
 Expected: architecture `amd64`, version `6.0.193`, labels `channel=cc1`,
-`patch.sha256=40f531…`, `upstream.commit=aab043c7…`. The image ID must equal the ID recorded
-in the release manifest.
+`patch.sha256=40f531…`, `upstream.commit=aab043c7…`. The image ID must equal
+`sha256:f4804baf2825f1e4f58d021ab0378a3b8b5728fbe01ce28b31036c7788b739a4`, recorded in
+`image-manifest.json`.
 
 ## 4. Prepare the node configuration (node-specific)
 
@@ -112,13 +135,21 @@ docker run --rm -v "$PWD/srs.conf:/usr/local/srs/conf/srs.conf:ro" \
 ## 5. Deploy
 
 ```bash
-docker compose -f docker-compose.node.yml up -d
-docker ps --filter name=<container>
-docker logs --since 2m <container> | tail -50
+export CC_SRS_CONF=/srv/srs/srs.conf        # node's own file
+export CC_MEDIA_DIR=/srv/srs/media          # node's own recorder mount
+export CC_SRS_CONTAINER=cloudcamera-v2-srs  # node's own container name
+export CC_PROJECT=cloudcamera-srs
+# bind the API/HTTP origin to a private address the backend can reach, and
+# firewall those ports to the backend IP:
+export CC_API_BIND=10.0.0.11
+export CC_HTTP_BIND=10.0.0.11
+docker compose -f docker-compose.uat.yml up -d
+docker ps --filter name=$CC_SRS_CONTAINER
+docker logs --since 2m $CC_SRS_CONTAINER | tail -50
 ```
 
 Use the node's existing container name, ports, mounts and restart policy. Do not introduce a
-new public port.
+new public port. Then run `./verify-ubuntu.sh` with the node's HLS/FLV/DVR values.
 
 ## 6. Post-start verification
 
@@ -139,17 +170,25 @@ browser path is the authenticated gateway.
 
 ## 7. Rollback
 
-Per node, in this order:
+`rollback-ubuntu.sh` restores the config recorded by `install-ubuntu.sh` and restarts the node
+on the previous image. It prints the plan first and does nothing without `--confirm`:
 
 ```bash
-docker compose -f docker-compose.node.yml down
-cp /root/srs-rollback-*/srs.conf <current-srs.conf>
-cp /root/srs-rollback-*/compose.yml <current-compose.yml>
-# previous image tag is already present locally (or: docker load -i previous-image.tar)
-docker compose -f docker-compose.node.yml up -d
+./rollback-ubuntu.sh --backup /root/srs-rollback-<stamp> \
+  --compose /opt/cloudcamera-srs/6.0.193-cc1/docker-compose.yml --confirm
 ```
 
-Verify publishers, HLS and DVR as in §6. Record the rollback reason.
+Manual equivalent, in this order:
+
+```bash
+docker compose -f docker-compose.uat.yml down
+cp /root/srs-rollback-*/srs.conf.previous <current-srs.conf>
+# previous image tag is already present locally (or: docker load -i previous-image.tar)
+CC_SRS_IMAGE=<previous-image> docker compose -f docker-compose.uat.yml up -d
+```
+
+Verify publishers, HLS and DVR as in §6. Record the rollback reason. Never delete the
+rollback directory.
 
 ## 8. Per-node worksheet
 
